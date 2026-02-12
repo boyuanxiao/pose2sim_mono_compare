@@ -1,0 +1,92 @@
+Please write me a program that takes a directory of Pose2Sim results (dir) and compares
+the 3D pose to that obtained from RTMPose3D, for a user-chosen camera.
+
+Assume single person throughout.
+
+## Shared keypoints
+
+The 17 COCO body keypoints (indices 0-16) are common to both systems.
+In the Pose2Sim HALPE_26 TRC file, the columns are named (not in ID order - they follow
+the skeleton hierarchy tree traversal). Use this mapping from COCO index to TRC column name:
+
+    COCO Index  TRC Column Name
+    0           Nose
+    1           LEye
+    2           REye
+    3           LEar
+    4           REar
+    5           LShoulder
+    6           RShoulder
+    7           LElbow
+    8           RElbow
+    9           LWrist
+    10          RWrist
+    11          LHip
+    12          RHip
+    13          LKnee
+    14          RKnee
+    15          LAnkle
+    16          RAnkle
+
+## Pose2Sim: transform keypoints into camera space
+
+- 3D keypoints are in dir/pose-3d. Choose the non-filtered TRC file, which is named
+  like dir_[START_FRAME]_[END_FRAME].trc (START_FRAME and END_FRAME are determined by
+  Pose2Sim, not user-chosen).
+- The TRC file contains world-space (X, Y, Z) coordinates for each keypoint. Columns
+  are tab-delimited: Frame#, Time, then each marker as three columns (X, Y, Z).
+  Column order follows the skeleton hierarchy, NOT keypoint ID order - use the name
+  mapping above to find the right columns.
+- The user provides the camera name. Extrinsics and intrinsics are in
+  dir/calibration/Calib_scene.toml, structured as:
+    [cam_name]
+    name = "cam_name"
+    size = [width, height]
+    matrix = [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]]   # intrinsic matrix
+    distortions = [k1, k2, p1, p2]
+    rotation = [rx, ry, rz]      # Rodrigues vector (axis-angle, 3 values)
+    translation = [tx, ty, tz]   # in meters
+    fisheye = false
+- To convert world coordinates to camera space:
+    R = cv2.Rodrigues(rotation_vector)   # convert to 3x3 rotation matrix
+    P_camera = R @ P_world + t
+- Extract only the 17 shared keypoints per frame.
+- Assume TRC frame numbers correspond directly to video frame numbers.
+
+## RTMPose3D: extract 3D keypoints from video
+
+- Videos are in dir/videos. The filename should contain the camera name so the correct
+  video can be identified.
+- Run RTMPose3D on the same frame range as found in the TRC file.
+- Use the camera intrinsics from the Pose2Sim calibration file (above) instead of
+  RTMPose3D's default H3.6M intrinsics. Pass them via RTMPose3D's camera_param.
+- Extract the first 17 keypoints (indices 0-16) from RTMPose3D's 133-keypoint output.
+- RTMPose3D applies an axis convention swap: keypoints_3d = -kpts[..., [0, 2, 1]]
+  resulting in X=horizontal, Y=depth, Z=vertical. Apply the same convention to the
+  Pose2Sim camera-space keypoints so both are in the same coordinate system.
+
+## Comparison
+
+For each frame:
+1. Compute hip centre for each source: midpoint of LHip (11) and RHip (12).
+2. Subtract hip centre so both skeletons are root-centred at the origin.
+3. Solve for the best-fit scale factor s (least-squares):
+     s = sum(rtm_centered * p2s_centered) / sum(rtm_centered^2)
+4. Apply: rtm_scaled = rtm_centered * s
+5. Compute per-joint Euclidean discrepancy: ||p2s_centered - rtm_scaled|| for each of
+   the 17 keypoints.
+
+## Output
+
+Save results to a CSV file with columns:
+    frame, keypoint_index, keypoint_name, discrepancy_m, scale_factor
+
+One row per keypoint per frame. discrepancy_m is in metres. scale_factor is the
+per-frame best-fit scale (same for all keypoints in a given frame).
+
+## Further suggestions
+
+- Consider also outputting summary statistics (mean/median/max discrepancy per keypoint
+  across all frames) either as a second CSV or printed to console.
+- A simple matplotlib visualization (e.g. bar chart of mean per-joint error) would be
+  helpful but is optional.
