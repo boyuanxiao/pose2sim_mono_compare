@@ -8,7 +8,6 @@ import re
 import cv2
 import numpy as np
 
-from rtmpose3d import RTMPose3DInference
 from pose2sim_to_camera import (
     KEYPOINT_MAPPING,
     find_trc_file,
@@ -38,8 +37,8 @@ def find_video(videos_dir, camera_name):
     for f in os.listdir(videos_dir):
         if not f.lower().endswith(video_exts):
             continue
-        # Match 'cam-01', 'cam01', 'cam_01' etc.
-        if re.search(rf"cam[_-]?0*{int(cam_num)}\b", f, re.IGNORECASE):
+        # Match 'cam-01', 'cam01', 'cam_01', 'cam-02' etc.
+        if re.search(rf"cam[_-]?0*{int(cam_num)}(?!\d)", f, re.IGNORECASE):
             candidates.append(f)
 
     if len(candidates) == 0:
@@ -140,6 +139,8 @@ def main():
                         help="Sample N frames evenly spaced across the full range")
     parser.add_argument("--device", default="cuda:0", help="Device (cuda:0, cpu)")
     parser.add_argument("--output", default=None, help="Output CSV path (default: auto)")
+    parser.add_argument("--extract-only", action="store_true",
+                        help="Only extract and save video frames (skip RTMPose3D inference)")
     args = parser.parse_args()
 
     pose3d_dir = os.path.join(args.dir, "pose-3d")
@@ -165,7 +166,19 @@ def main():
     frames_data = extract_frames(video_path, frames)
     print(f"Extracted {len(frames_data)} frames from video")
 
-    # Initialize RTMPose3D
+    # If extract-only mode, save frames as images and exit
+    if args.extract_only:
+        out_dir = os.path.join(args.dir, "extracted_frames")
+        os.makedirs(out_dir, exist_ok=True)
+        for frame_num, image in frames_data:
+            out_path = os.path.join(out_dir, f"{args.camera}_frame{frame_num:06d}.jpg")
+            cv2.imwrite(out_path, image)
+            print(f"  Saved {out_path} ({image.shape[1]}x{image.shape[0]})")
+        print(f"Saved {len(frames_data)} frames to {out_dir}")
+        return
+
+    # Initialize RTMPose3D (lazy import so --extract-only works without the package)
+    from rtmpose3d import RTMPose3DInference
     print(f"Loading RTMPose3D model on {args.device}...")
     model = RTMPose3DInference(device=args.device)
     print("Model loaded.")
