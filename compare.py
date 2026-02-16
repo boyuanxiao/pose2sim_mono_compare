@@ -1,4 +1,4 @@
-"""Compare Pose2Sim and RTMPose3D 3D keypoints after root-centering and scale fitting."""
+"""Compare Pose2Sim and RTMPose3D 3D keypoints using Procrustes alignment."""
 
 import argparse
 import csv
@@ -42,49 +42,65 @@ def load_keypoints_csv(csv_path):
     return result
 
 
-def apply_axis_swap(kpts):
-    """Apply the RTMPose3D axis convention swap to camera-space coordinates.
+def procrustes_align(source, target):
+    """Procrustes alignment: find rotation, scale, translation mapping source -> target.
 
-    Standard camera: X=right, Y=down, Z=forward
-    RTMPose3D convention: X=horizontal, Y=depth, Z=vertical
-    Transform: new = -old[:, [0, 2, 1]]
+    Args:
+        source: (K, 3) points to be aligned (RTMPose3D).
+        target: (K, 3) reference points (Pose2Sim).
+
+    Returns:
+        aligned: (K, 3) source after alignment.
+        scale: best-fit scale factor.
+        rotation: (3, 3) rotation matrix.
     """
-    return -kpts[:, [0, 2, 1]]
+    # 1. Centre both at hip midpoint
+    src_hip = (source[LHIP_POS] + source[RHIP_POS]) / 2
+    tgt_hip = (target[LHIP_POS] + target[RHIP_POS]) / 2
+    src_c = source - src_hip
+    tgt_c = target - tgt_hip
+
+    # 2. Cross-covariance matrix and SVD
+    H = src_c.T @ tgt_c  # (3, 3)
+    U, S, Vt = np.linalg.svd(H)
+
+    # Ensure proper rotation (no reflection)
+    d = np.linalg.det(Vt.T @ U.T)
+    sign_matrix = np.diag([1, 1, np.sign(d)])
+    rotation = Vt.T @ sign_matrix @ U.T  # (3, 3)
+
+    # 3. Apply rotation, then solve for scale
+    src_rotated = src_c @ rotation.T
+    scale = np.sum(src_rotated * tgt_c) / np.sum(src_rotated ** 2)
+
+    # 4. Full alignment
+    aligned = src_rotated * scale
+
+    return aligned, scale, rotation
 
 
 def align_and_compare(p2s_kpts, rtm_kpts):
-    """Root-centre, scale-fit, and compute per-joint discrepancy for one frame.
+    """Procrustes-align RTMPose3D onto Pose2Sim and compute per-joint discrepancy.
 
     Args:
-        p2s_kpts: (13, 3) Pose2Sim keypoints (already axis-swapped).
+        p2s_kpts: (13, 3) Pose2Sim camera-space keypoints.
         rtm_kpts: (13, 3) RTMPose3D keypoints.
 
     Returns:
         discrepancies: (13,) per-joint Euclidean distance in metres.
         scale: best-fit scale factor.
+        rotation: (3, 3) best-fit rotation matrix.
+        rtm_aligned: (13, 3) RTMPose3D keypoints after Procrustes alignment.
+        p2s_centered: (13, 3) Pose2Sim keypoints centred at hip midpoint.
     """
-    # Hip centre
     p2s_hip = (p2s_kpts[LHIP_POS] + p2s_kpts[RHIP_POS]) / 2
-    rtm_hip = (rtm_kpts[LHIP_POS] + rtm_kpts[RHIP_POS]) / 2
-
-    # Root-centre
     p2s_centered = p2s_kpts - p2s_hip
-    rtm_centered = rtm_kpts - rtm_hip
 
-    # Best-fit scale: s = sum(rtm * p2s) / sum(rtm^2)
-    numerator = np.sum(rtm_centered * p2s_centered)
-    denominator = np.sum(rtm_centered ** 2)
-    if denominator < 1e-12:
-        return np.full(len(SHARED_COCO_INDICES), np.nan), np.nan
-    scale = numerator / denominator
+    rtm_aligned, scale, rotation = procrustes_align(rtm_kpts, p2s_kpts)
 
-    # Apply scale
-    rtm_scaled = rtm_centered * scale
+    discrepancies = np.linalg.norm(p2s_centered - rtm_aligned, axis=1)
 
-    # Per-joint discrepancy
-    discrepancies = np.linalg.norm(p2s_centered - rtm_scaled, axis=1)
-
-    return discrepancies, scale
+    return discrepancies, scale, rotation, rtm_aligned, p2s_centered
 
 
 def main():
@@ -120,11 +136,8 @@ def main():
     all_scales = []
 
     for frame in common_frames:
-        # Apply axis swap to Pose2Sim camera-space data
-        p2s_swapped = apply_axis_swap(p2s_data[frame])
-        rtm_kpts = rtm_data[frame]
-
-        discrepancies, scale = align_and_compare(p2s_swapped, rtm_kpts)
+        discrepancies, scale, rotation, _, _ = align_and_compare(
+            p2s_data[frame], rtm_data[frame])
         all_discrepancies.append(discrepancies)
         all_scales.append(scale)
 
