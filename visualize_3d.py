@@ -3,7 +3,8 @@
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
-from compare import load_keypoints_csv, align_and_compare, SHARED_COCO_INDICES
+from compare import (load_keypoints_csv, align_and_compare, SHARED_COCO_INDICES,
+                     LHIP_POS, RHIP_POS)
 from pose2sim_to_camera import KEYPOINT_MAPPING
 
 # Skeleton connections (pairs of COCO indices)
@@ -21,9 +22,47 @@ SKELETON = [
 # Map COCO index to position in the 13-keypoint array
 COCO_TO_POS = {idx: i for i, idx in enumerate(SHARED_COCO_INDICES)}
 
+# Ankle positions in the 13-keypoint array
+LANKLE_POS = SHARED_COCO_INDICES.index(15)  # 11
+RANKLE_POS = SHARED_COCO_INDICES.index(16)  # 12
+
 # Colours
 COLOR_P2S = "tab:blue"
 COLOR_RTM = "tab:orange"
+
+
+def upright_rotation(kpts):
+    """Compute rotation that aligns the mid-hip -> mid-ankle axis with -Z (upright).
+
+    The skeleton is already hip-centred, so mid-hip is at the origin.
+    Mid-ankle points downward, so we align that direction with -Z.
+
+    Returns:
+        R: (3, 3) rotation matrix.
+    """
+    mid_ankle = (kpts[LANKLE_POS] + kpts[RANKLE_POS]) / 2
+    # Direction from hip to ankle (points "downward" on the body)
+    v = mid_ankle  # hip is at origin
+    v = v / np.linalg.norm(v)
+
+    # Target direction: -Z (so feet are below, head above)
+    target = np.array([0.0, 0.0, -1.0])
+
+    # Rotation via Rodrigues' formula
+    cross = np.cross(v, target)
+    sin_a = np.linalg.norm(cross)
+    cos_a = np.dot(v, target)
+
+    if sin_a < 1e-8:
+        # Already aligned (or anti-aligned)
+        return np.eye(3) if cos_a > 0 else np.diag([1, -1, -1])
+
+    k = cross / sin_a  # unit rotation axis
+    K = np.array([[0, -k[2], k[1]],
+                  [k[2], 0, -k[0]],
+                  [-k[1], k[0], 0]])
+    R = np.eye(3) + sin_a * K + (1 - cos_a) * (K @ K)
+    return R
 
 
 def plot_skeleton(ax, kpts, label, show_labels=True, color="tab:blue"):
@@ -58,6 +97,8 @@ def main():
                         help="Frame number to plot (default: first common frame)")
     parser.add_argument("--no-labels", action="store_true",
                         help="Hide keypoint name labels")
+    parser.add_argument("--output", default=None,
+                        help="Save to PNG instead of showing interactively")
     args = parser.parse_args()
 
     # Load both CSVs
@@ -81,6 +122,11 @@ def main():
 
     print(f"Frame {frame}: scale={scale:.4f}, "
           f"mean discrepancy={discrepancies.mean():.4f} m")
+
+    # Rotate both so the standing axis (hip->ankle) aligns with Z
+    R_up = upright_rotation(p2s_centered)
+    p2s_centered = p2s_centered @ R_up.T
+    rtm_aligned = rtm_aligned @ R_up.T
 
     show_labels = not args.no_labels
 
@@ -107,7 +153,11 @@ def main():
     ax.set_zlim(mid[2] - max_range, mid[2] + max_range)
 
     plt.tight_layout()
-    plt.show()
+    if args.output:
+        fig.savefig(args.output, dpi=150, bbox_inches="tight")
+        print(f"Saved to {args.output}")
+    else:
+        plt.show()
 
 
 if __name__ == "__main__":

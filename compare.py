@@ -103,6 +103,21 @@ def align_and_compare(p2s_kpts, rtm_kpts):
     return discrepancies, scale, rotation, rtm_aligned, p2s_centered
 
 
+def principal_variances(kpts):
+    """Compute variance along each principal axis of a (K, 3) point cloud.
+
+    Returns:
+        variances: (3,) sorted descending (PC1 >= PC2 >= PC3).
+        axes: (3, 3) principal axes as rows, sorted by variance.
+    """
+    centered = kpts - kpts.mean(axis=0)
+    cov = centered.T @ centered / len(centered)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    # eigh returns ascending order; reverse to descending
+    order = eigvals.argsort()[::-1]
+    return eigvals[order], eigvecs[:, order].T
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Compare Pose2Sim and RTMPose3D 3D keypoints"
@@ -175,6 +190,32 @@ def main():
     overall = all_discrepancies.mean()
     print("-" * 41)
     print(f"{'Overall':<15} {overall:>8.4f}")
+
+    # Depth compression analysis via PCA
+    p2s_vars = []  # (N_frames, 3)
+    rtm_vars = []
+    for frame in common_frames:
+        _, _, _, rtm_aligned, p2s_centered = align_and_compare(
+            p2s_data[frame], rtm_data[frame])
+        pv_p2s, _ = principal_variances(p2s_centered)
+        pv_rtm, _ = principal_variances(rtm_aligned)
+        p2s_vars.append(pv_p2s)
+        rtm_vars.append(pv_rtm)
+
+    p2s_vars = np.array(p2s_vars)  # (N_frames, 3)
+    rtm_vars = np.array(rtm_vars)
+
+    print(f"\nDepth compression analysis (PCA variance per principal axis):")
+    print(f"{'':15} {'PC1 (spread)':>14} {'PC2 (width)':>14} {'PC3 (depth)':>14}")
+    print("-" * 59)
+    print(f"{'Pose2Sim':<15} {p2s_vars[:, 0].mean():>14.6f} "
+          f"{p2s_vars[:, 1].mean():>14.6f} {p2s_vars[:, 2].mean():>14.6f}")
+    print(f"{'RTMPose3D':<15} {rtm_vars[:, 0].mean():>14.6f} "
+          f"{rtm_vars[:, 1].mean():>14.6f} {rtm_vars[:, 2].mean():>14.6f}")
+
+    ratio = rtm_vars.mean(axis=0) / p2s_vars.mean(axis=0)
+    print(f"{'Ratio (R/P)':<15} {ratio[0]:>14.3f} {ratio[1]:>14.3f} {ratio[2]:>14.3f}")
+    print(f"\nA ratio << 1.0 on PC3 indicates depth compression in RTMPose3D.")
 
 
 if __name__ == "__main__":
